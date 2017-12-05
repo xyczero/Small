@@ -32,7 +32,6 @@ import android.content.pm.ServiceInfo;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
-import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.content.Context;
@@ -180,10 +179,6 @@ public class ApkBundleLauncher extends SoBundleLauncher {
             // Replace with the REAL activityInfo
             ActivityInfo targetInfo = sLoadedActivities.get(targetClass);
             ReflectAccelerator.setActivityInfo(r, targetInfo);
-
-            // Ensure the merged application-scope resource has been cached so that
-            // the incoming activity can attach to it without creating a new(unmerged) one.
-            ReflectAccelerator.ensureCacheResources();
         }
 
         private void ensureServiceClassesLoadable(Message msg) {
@@ -310,6 +305,7 @@ public class ApkBundleLauncher extends SoBundleLauncher {
                 if (ai == null) break;
 
                 applyActivityInfo(activity, ai);
+                ReflectAccelerator.ensureResourcesMerged();
             } while (false);
 
             // Reset activity instrumentation if it was modified by some other applications #245

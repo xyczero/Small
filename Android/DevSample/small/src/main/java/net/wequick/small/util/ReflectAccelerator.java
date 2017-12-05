@@ -16,6 +16,7 @@
 
 package net.wequick.small.util;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.Application;
 import android.app.Instrumentation;
@@ -37,11 +38,14 @@ import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.zip.ZipFile;
 
 import dalvik.system.DexClassLoader;
@@ -57,9 +61,6 @@ public class ReflectAccelerator {
     // ActivityClientRecord
     private static Field sActivityClientRecord_intent_field;
     private static Field sActivityClientRecord_activityInfo_field;
-
-    private static ArrayMap<Object, WeakReference<Object>> sResourceImpls;
-    private static Object/*ResourcesImpl*/ sMergedResourcesImpl;
 
     private ReflectAccelerator() { /** cannot be instantiated */ }
 
@@ -430,6 +431,233 @@ public class ReflectAccelerator {
         }
     }
 
+    private static final class MR_V9_V18 {
+
+        static void mergeResources(Application app, Object activityThread, String[] assetPaths) {
+            AssetManager newAssetManager = newAssetManager();
+            addAssetPaths(newAssetManager, assetPaths);
+            try {
+                Method mEnsureStringBlocks = AssetManager.class.getDeclaredMethod("ensureStringBlocks", new Class[0]);
+                mEnsureStringBlocks.setAccessible(true);
+                mEnsureStringBlocks.invoke(newAssetManager, new Object[0]);
+
+                Field fMActiveResources = activityThread.getClass().getDeclaredField("mActiveResources");
+                fMActiveResources.setAccessible(true);
+                HashMap<?, WeakReference<Resources>> map = (HashMap) fMActiveResources.get(activityThread);
+                Collection<WeakReference<Resources>> references = map.values();
+
+                //to array
+                WeakReference[] referenceArrays = new WeakReference[references.size()];
+                references.toArray(referenceArrays);
+
+                for (int i = 0; i < referenceArrays.length; i++) {
+                    Resources resources = (Resources) referenceArrays[i].get();
+                    if (resources == null) continue;
+
+                    Field mAssets = Resources.class.getDeclaredField("mAssets");
+                    mAssets.setAccessible(true);
+                    mAssets.set(resources, newAssetManager);
+
+                    resources.updateConfiguration(resources.getConfiguration(), resources.getDisplayMetrics());
+                }
+            } catch (Throwable e) {
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
+    private static final class MR_V19_V23 {
+
+        @SuppressLint("NewApi")
+        static void mergeResources(Application app, Object activityThread, String[] assetPaths) {
+            AssetManager newAssetManager = newAssetManager();
+            addAssetPaths(newAssetManager, assetPaths);
+            try {
+                Method mEnsureStringBlocks = AssetManager.class.getDeclaredMethod("ensureStringBlocks", new Class[0]);
+                mEnsureStringBlocks.setAccessible(true);
+                mEnsureStringBlocks.invoke(newAssetManager, new Object[0]);
+
+                Class<?> resourcesManagerClass = Class.forName("android.app.ResourcesManager");
+                Method mGetInstance = resourcesManagerClass.getDeclaredMethod("getInstance", new Class[0]);
+                mGetInstance.setAccessible(true);
+                Object resourcesManager = mGetInstance.invoke(null, new Object[0]);
+
+                Field fMActiveResources = resourcesManagerClass.getDeclaredField("mActiveResources");
+                fMActiveResources.setAccessible(true);
+                ArrayMap<?, WeakReference<Resources>> arrayMap = (ArrayMap) fMActiveResources.get(resourcesManager);
+                Collection<WeakReference<Resources>> references = arrayMap.values();
+
+                //to array
+                WeakReference[] referenceArrays = new WeakReference[references.size()];
+                references.toArray(referenceArrays);
+
+                for (WeakReference referenceArray : referenceArrays) {
+                    Resources resources = (Resources) referenceArray.get();
+                    if (resources == null) continue;
+
+                    Field mAssets = Resources.class.getDeclaredField("mAssets");
+                    mAssets.setAccessible(true);
+                    mAssets.set(resources, newAssetManager);
+
+                    resources.updateConfiguration(resources.getConfiguration(), resources.getDisplayMetrics());
+                    clearResourcesTypeArrayPools(resources);
+                }
+            } catch (Throwable e) {
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
+    private static final class MR_V24_ {
+        private static Class<?> sResourcesManagerClass;
+        private static Field sResourcesImpl_mAssets_field;
+        private static Field sResourcesManager_mResourceReferences_field;
+        private static Field sResourcesManager_mActivityResourceReferences_field;
+        private static Field sResourcesManager_activityResources_field;
+        private static Method sAssetManager_mEnsureStringBlocks_method;
+
+        private static ArrayMap<Object, WeakReference<Object>> sResourceImpls;
+        private static Set<Object> sResourcesKeyList;
+        //the value of index 0 is the application defaulted package resource path. due to ApkBundleLauncher#postSetUp
+        private static String[] sResourcePaths;
+
+        @SuppressLint("NewApi")
+        static void mergeResources(Application app, Object activityThread, String[] assetPaths) {
+            sResourcePaths = assetPaths;
+            try {
+                Class<?> resourcesManagerClass = getResourcesManagerClass();
+                Object resourcesManager = getResourcesManager(resourcesManagerClass);
+
+                Field fMResourceImpls = resourcesManagerClass.getDeclaredField("mResourceImpls");
+                fMResourceImpls.setAccessible(true);
+                sResourceImpls = (ArrayMap) fMResourceImpls.get(resourcesManager);
+                if (sResourceImpls != null) {
+                    // Above Android N, The resourceImpl may be created by different configurations actually
+                    // such as fontScale and creating at least two resourceImpl including each asset for
+                    // activities and others.
+                    for (Object key : sResourceImpls.keySet()) {
+                        WeakReference<Object> resourcesImplWr = sResourceImpls.get(key);
+                        Object resourcesImpl = resourcesImplWr.get();
+                        if (resourcesImpl != null) {
+                            mergeResources(assetPaths, resourcesImpl);
+                            if (sResourcesKeyList == null) {
+                                sResourcesKeyList = new HashSet<>();
+                            }
+                            sResourcesKeyList.add(key);
+                        }
+                    }
+                    updateResources(resourcesManager);
+                }
+            } catch (Throwable e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        static void ensureResourcesMerged() {
+            //FIXME: may can be better
+            try {
+                Set<?> resourceKeys = sResourceImpls.keySet();
+                boolean needUpdate = false;
+                for (Object resourceKey : resourceKeys) {
+                    WeakReference resourceImpl = (WeakReference) sResourceImpls.get(resourceKey);
+                    if (resourceImpl != null && resourceImpl.get() != null) {
+                        if (!sResourcesKeyList.contains(resourceKey)) {
+                            mergeResources(sResourcePaths, resourceImpl.get());
+                            sResourcesKeyList.add(resourceKey);
+                            needUpdate = true;
+                        }
+                    } else {
+                        // We try to remove the key of the weak reference for the key was released by
+                        // what we can not find the cache resources we had merged before,
+                        // Then we can merged it after the system recreating a new one which only build with host resources.
+                        sResourcesKeyList.remove(resourceKey);
+                    }
+                }
+                if (needUpdate) {
+                    updateResources(getResourcesManager(getResourcesManagerClass()));
+                }
+            } catch (Throwable e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        private static void mergeResources(String[] assetPaths, Object resourcesImpl)
+                throws NoSuchFieldException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+            if (sResourcesImpl_mAssets_field == null) {
+                try {
+                    sResourcesImpl_mAssets_field = resourcesImpl.getClass().getDeclaredField("mAssets");
+                } catch (NoSuchFieldException e) {
+                    // Compat for MiUI 8+
+                    sResourcesImpl_mAssets_field = resourcesImpl.getClass().getSuperclass().getDeclaredField("mAssets");
+                }
+                sResourcesImpl_mAssets_field.setAccessible(true);
+            }
+            AssetManager resourcesImplAsset = (AssetManager) sResourcesImpl_mAssets_field.get(resourcesImpl);
+            addAssetPaths(resourcesImplAsset, assetPaths);
+
+            if (sAssetManager_mEnsureStringBlocks_method == null) {
+                sAssetManager_mEnsureStringBlocks_method =
+                        AssetManager.class.getDeclaredMethod("ensureStringBlocks", new Class[0]);
+                sAssetManager_mEnsureStringBlocks_method.setAccessible(true);
+            }
+            sAssetManager_mEnsureStringBlocks_method.invoke(resourcesImplAsset, new Object[0]);
+        }
+
+        private static void updateResources(Object resourcesManager) throws NoSuchFieldException,
+                IllegalAccessException, NoSuchMethodException, InvocationTargetException, ClassNotFoundException {
+            if (sResourcesManager_mResourceReferences_field == null) {
+                sResourcesManager_mResourceReferences_field = getResourcesManagerClass().getDeclaredField("mResourceReferences");
+                sResourcesManager_mResourceReferences_field.setAccessible(true);
+            }
+            Collection<WeakReference<Resources>> references =
+                    (Collection) sResourcesManager_mResourceReferences_field.get(resourcesManager);
+            //to array
+            WeakReference[] referenceArrays = new WeakReference[references.size()];
+            references.toArray(referenceArrays);
+            for (WeakReference referenceArray : referenceArrays) {
+                Resources resources = (Resources) referenceArray.get();
+                if (resources == null) continue;
+                resources.updateConfiguration(resources.getConfiguration(), resources.getDisplayMetrics());
+                clearResourcesTypeArrayPools(resources);
+            }
+
+            if (sResourcesManager_mActivityResourceReferences_field == null) {
+                sResourcesManager_mActivityResourceReferences_field = getResourcesManagerClass().getDeclaredField("mActivityResourceReferences");
+                sResourcesManager_mActivityResourceReferences_field.setAccessible(true);
+            }
+            Collection activities = ((WeakHashMap<Object, Object>)
+                    sResourcesManager_mActivityResourceReferences_field.get(resourcesManager)).values();
+            if (sResourcesManager_activityResources_field == null) {
+                sResourcesManager_activityResources_field = Class.forName("android.app.ResourcesManager$ActivityResources").getField("activityResources");
+                sResourcesManager_activityResources_field.setAccessible(true);
+            }
+            for (Object activity : activities) {
+                List<WeakReference<Resources>> list =
+                        (List<WeakReference<Resources>>) sResourcesManager_activityResources_field.get(activity);
+                for (WeakReference<Resources> resourcesWR : list) {
+                    Resources resources = resourcesWR.get();
+                    if (resources == null) continue;
+                    resources.updateConfiguration(resources.getConfiguration(), resources.getDisplayMetrics());
+                    clearResourcesTypeArrayPools(resources);
+                }
+            }
+        }
+
+        private static Object getResourcesManager(Class<?> resourcesManagerClass)
+                throws NoSuchMethodException, IllegalAccessException, InvocationTargetException {
+            Method mGetInstance = resourcesManagerClass.getDeclaredMethod("getInstance", new Class[0]);
+            mGetInstance.setAccessible(true);
+            return mGetInstance.invoke(null, new Object[0]);
+        }
+
+        private static Class<?> getResourcesManagerClass() throws ClassNotFoundException {
+            if (sResourcesManagerClass == null) {
+                sResourcesManagerClass = Class.forName("android.app.ResourcesManager");
+            }
+            return sResourcesManagerClass;
+        }
+    }
+
     //______________________________________________________________________________________________
     // API
 
@@ -468,126 +696,19 @@ public class ReflectAccelerator {
     }
 
     public static void mergeResources(Application app, Object activityThread, String[] assetPaths) {
-        AssetManager newAssetManager;
-        if (Build.VERSION.SDK_INT < 24) {
-            newAssetManager = newAssetManager();
+        int v = Build.VERSION.SDK_INT;
+        if (v < 19) {
+            MR_V9_V18.mergeResources(app, activityThread, assetPaths);
+        } else if (v < 24) {
+            MR_V19_V23.mergeResources(app, activityThread, assetPaths);
         } else {
-            // On Android 7.0+, this should contains a WebView asset as base. #347
-            newAssetManager = app.getAssets();
-        }
-        addAssetPaths(newAssetManager, assetPaths);
-
-        try {
-            Method mEnsureStringBlocks = AssetManager.class.getDeclaredMethod("ensureStringBlocks", new Class[0]);
-            mEnsureStringBlocks.setAccessible(true);
-            mEnsureStringBlocks.invoke(newAssetManager, new Object[0]);
-
-            Collection<WeakReference<Resources>> references;
-
-            if (Build.VERSION.SDK_INT >= 19) {
-                Class<?> resourcesManagerClass = Class.forName("android.app.ResourcesManager");
-                Method mGetInstance = resourcesManagerClass.getDeclaredMethod("getInstance", new Class[0]);
-                mGetInstance.setAccessible(true);
-                Object resourcesManager = mGetInstance.invoke(null, new Object[0]);
-                try {
-                    Field fMActiveResources = resourcesManagerClass.getDeclaredField("mActiveResources");
-                    fMActiveResources.setAccessible(true);
-
-                    ArrayMap<?, WeakReference<Resources>> arrayMap = (ArrayMap)fMActiveResources.get(resourcesManager);
-
-                    references = arrayMap.values();
-                } catch (NoSuchFieldException ignore) {
-                    Field mResourceReferences = resourcesManagerClass.getDeclaredField("mResourceReferences");
-                    mResourceReferences.setAccessible(true);
-
-                    references = (Collection) mResourceReferences.get(resourcesManager);
-                }
-
-                if (Build.VERSION.SDK_INT >= 24) {
-                    Field fMResourceImpls = resourcesManagerClass.getDeclaredField("mResourceImpls");
-                    fMResourceImpls.setAccessible(true);
-                    sResourceImpls = (ArrayMap)fMResourceImpls.get(resourcesManager);
-                }
-            } else {
-                Field fMActiveResources = activityThread.getClass().getDeclaredField("mActiveResources");
-                fMActiveResources.setAccessible(true);
-
-                HashMap<?, WeakReference<Resources>> map = (HashMap)fMActiveResources.get(activityThread);
-
-                references = map.values();
-            }
-
-            //to array
-            WeakReference[] referenceArrays = new WeakReference[references.size()];
-            references.toArray(referenceArrays);
-
-            for (int i = 0; i < referenceArrays.length; i++) {
-                Resources resources = (Resources) referenceArrays[i].get();
-                if (resources == null) continue;
-
-                try {
-                    Field mAssets = Resources.class.getDeclaredField("mAssets");
-                    mAssets.setAccessible(true);
-                    mAssets.set(resources, newAssetManager);
-                } catch (Throwable ignore) {
-                    Field mResourcesImpl = Resources.class.getDeclaredField("mResourcesImpl");
-                    mResourcesImpl.setAccessible(true);
-                    Object resourceImpl = mResourcesImpl.get(resources);
-                    Field implAssets;
-                    try {
-                        implAssets = resourceImpl.getClass().getDeclaredField("mAssets");
-                    } catch (NoSuchFieldException e) {
-                        // Compat for MiUI 8+
-                        implAssets = resourceImpl.getClass().getSuperclass().getDeclaredField("mAssets");
-                    }
-                    implAssets.setAccessible(true);
-                    implAssets.set(resourceImpl, newAssetManager);
-
-                    if (Build.VERSION.SDK_INT >= 24) {
-                        if (resources == app.getResources()) {
-                            sMergedResourcesImpl = resourceImpl;
-                        }
-                    }
-                }
-
-                resources.updateConfiguration(resources.getConfiguration(), resources.getDisplayMetrics());
-            }
-
-            if (Build.VERSION.SDK_INT >= 21) {
-                for (int i = 0; i < referenceArrays.length; i++) {
-                    Resources resources = (Resources) referenceArrays[i].get();
-                    if (resources == null) continue;
-
-                    // android.util.Pools$SynchronizedPool<TypedArray>
-                    Field mTypedArrayPool = Resources.class.getDeclaredField("mTypedArrayPool");
-                    mTypedArrayPool.setAccessible(true);
-                    Object typedArrayPool = mTypedArrayPool.get(resources);
-                    // Clear all the pools
-                    Method acquire = typedArrayPool.getClass().getMethod("acquire");
-                    acquire.setAccessible(true);
-                    while (acquire.invoke(typedArrayPool) != null) ;
-                }
-            }
-        } catch (Throwable e) {
-            throw new IllegalStateException(e);
+            MR_V24_.mergeResources(app, activityThread, assetPaths);
         }
     }
 
-    public static void ensureCacheResources() {
-        if (Build.VERSION.SDK_INT < 24) return;
-        if (sResourceImpls == null || sMergedResourcesImpl == null) return;
-
-        Set<?> resourceKeys = sResourceImpls.keySet();
-        for (Object resourceKey : resourceKeys) {
-            WeakReference resourceImpl = (WeakReference)sResourceImpls.get(resourceKey);
-            if (resourceImpl != null && resourceImpl.get() != sMergedResourcesImpl) {
-                // Sometimes? the weak reference for the key was released by what
-                // we can not find the cache resources we had merged before.
-                // And the system will recreate a new one which only build with host resources.
-                // So we needs to restore the cache. Fix #429.
-                // FIXME: we'd better to find the way to KEEP the weak reference.
-                sResourceImpls.put(resourceKey, new WeakReference<Object>(sMergedResourcesImpl));
-            }
+    public static void ensureResourcesMerged() {
+        if (Build.VERSION.SDK_INT >= 24) {
+            MR_V24_.ensureResourcesMerged();
         }
     }
 
@@ -807,6 +928,21 @@ public class ReflectAccelerator {
             // Ignored
             e.printStackTrace();
         }
+    }
+
+    private static void clearResourcesTypeArrayPools(Resources resources)
+            throws NoSuchFieldException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+        if (Build.VERSION.SDK_INT < 21) {
+            return;
+        }
+        // android.util.Pools$SynchronizedPool<TypedArray>
+        Field mTypedArrayPool = Resources.class.getDeclaredField("mTypedArrayPool");
+        mTypedArrayPool.setAccessible(true);
+        Object typedArrayPool = mTypedArrayPool.get(resources);
+        // Clear all the pools
+        Method acquire = typedArrayPool.getClass().getMethod("acquire");
+        acquire.setAccessible(true);
+        while (acquire.invoke(typedArrayPool) != null) ;
     }
 
     public static void setField(Class clazz, Object target, String name, Object value) throws Exception {
